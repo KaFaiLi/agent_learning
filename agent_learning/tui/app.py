@@ -130,7 +130,7 @@ class AgentLearningApp(App[None]):
         runtime_lines = ["Runtime"]
         runtime_lines.append(f"- Azure configured: {snapshot['azure_configured']}")
         runtime_lines.append(f"- MCP servers: {len(snapshot['mcp'])}")
-        runtime_lines.append(f"- Memory DB: {self.engine.settings.memory_db_path}")
+        runtime_lines.append(f"- Memory Store: {self.engine.settings.memory_store_path}")
 
         memory_lines = ["Latest Run"]
         if self.last_report is None:

@@ -1,10 +1,34 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from agent_learning.config import AzureOpenAISettings
 from agent_learning.models import AgentCard, BudgetState, LoopActionType, LoopDecision, UsageSnapshot
 from agent_learning.usage import PricingCatalog
+
+
+def _make_schema_strict(schema: dict[str, Any]) -> dict[str, Any]:
+    """Recursively patch a JSON schema to satisfy Azure OpenAI strict-mode requirements.
+
+    Azure requires every object node to have ``additionalProperties: false``
+    and every property key to appear in ``required``.
+    """
+    schema = dict(schema)
+    if schema.get("type") == "object" and "properties" in schema:
+        schema["additionalProperties"] = False
+        schema["required"] = list(schema["properties"].keys())
+    for section in ("$defs", "properties"):
+        if section in schema:
+            schema[section] = {
+                k: _make_schema_strict(v) for k, v in schema[section].items()
+            }
+    for keyword in ("anyOf", "allOf", "oneOf"):
+        if keyword in schema:
+            schema[keyword] = [_make_schema_strict(s) for s in schema[keyword]]
+    if "items" in schema:
+        schema["items"] = _make_schema_strict(schema["items"])
+    return schema
 
 
 class DecisionPlanner:
@@ -81,7 +105,7 @@ class DecisionPlanner:
                 "json_schema": {
                     "name": "loop_decision",
                     "strict": True,
-                    "schema": LoopDecision.model_json_schema(),
+                    "schema": _make_schema_strict(LoopDecision.model_json_schema()),
                 },
             },
         )

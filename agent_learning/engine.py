@@ -15,7 +15,7 @@ from agent_learning.usage import PricingCatalog, merge_usage
 class RuntimeEngine:
     def __init__(self, settings: RuntimeSettings) -> None:
         self.settings = settings
-        self.store = MemoryStore(settings.memory_db_path)
+        self.store = MemoryStore(settings.memory_store_path)
         self.agents = AgentRegistry(settings.agent_dir)
         self.skills = SkillRegistry(settings.skill_dir)
         self.mcp_bridge = MCPBridge(settings.mcp_config_path)

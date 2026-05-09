@@ -45,7 +45,7 @@ def main() -> None:
     if args.print_config:
         print(f"agent_dir={settings.agent_dir}")
         print(f"mcp_config_path={settings.mcp_config_path}")
-        print(f"memory_db_path={settings.memory_db_path}")
+        print(f"memory_store_path={settings.memory_store_path}")
         print(f"azure_configured={settings.azure.is_configured}")
         print(f"pricing_model_name={settings.pricing.model_name}")
         print(f"max_iterations={settings.max_iterations}")

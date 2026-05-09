@@ -5,8 +5,9 @@ This repo now contains the first runnable slice of an agentic LLM demo built wit
 ## Current Features
 
 - Azure OpenAI configuration from local environment variables only
+- Root `.env` file is auto-loaded at startup
 - Structured loop decisions via typed Pydantic models
-- SQLite-backed runtime memory with working and summary entries
+- Parquet-backed runtime memory with working and summary entries
 - Token and estimated cost tracking with configurable pricing
 - Markdown-defined agents with subagent delegation
 - Markdown-defined skills that can be surfaced to the runtime
@@ -17,7 +18,7 @@ This repo now contains the first runnable slice of an agentic LLM demo built wit
 
 ## Environment Variables
 
-Set the Azure settings in your local shell before running the app:
+Set the Azure settings in your local shell or in a project-root `.env` file before running the app:
 
 - `AZURE_OPENAI_ENDPOINT`
 - `AZURE_OPENAI_API_KEY`
@@ -35,7 +36,8 @@ Optional runtime overrides:
 - `AGENT_LEARNING_AGENT_DIR`
 - `AGENT_LEARNING_SKILL_DIR`
 - `AGENT_LEARNING_MCP_CONFIG`
-- `AGENT_LEARNING_MEMORY_DB`
+- `AGENT_LEARNING_MEMORY_PATH`
+- `AGENT_LEARNING_MEMORY_DB` (legacy alias; `.db` values are normalized to `.parquet`)
 - `AGENT_LEARNING_MAX_ITERATIONS`
 - `AGENT_LEARNING_STEP_BUDGET_USD`
 - `AGENT_LEARNING_RUN_BUDGET_USD`
@@ -73,7 +75,7 @@ The runtime currently discovers MCP server definitions from `mcp_servers.yaml`. 
 ## Project Layout
 
 - `agent_learning/config.py`: environment-backed runtime settings
-- `agent_learning/memory.py`: SQLite-backed memory and usage persistence
+- `agent_learning/memory.py`: parquet-backed memory and usage persistence
 - `agent_learning/llm.py`: Azure OpenAI planner plus heuristic fallback
 - `agent_learning/engine.py`: Ralph-loop style orchestration
 - `agent_learning/tui/app.py`: Textual UI shell
