@@ -1,0 +1,15 @@
+[project]
+name = "agent-learning"
+version = "0.1.0"
+description = "Agentic LLM demo with a TUI, Azure OpenAI, memory, and usage tracking"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+	"openai>=1.82.0",
+	"pydantic>=2.11.4",
+	"PyYAML>=6.0.2",
+	"textual>=0.86.1",
+]
+
+[project.scripts]
+agent-learning = "agent_learning.cli:main"
