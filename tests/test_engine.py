@@ -38,10 +38,10 @@ class RuntimeEngineTests(unittest.TestCase):
             settings.ensure_storage_dirs()
             engine = RuntimeEngine(settings)
 
-            report = engine.run_goal("inspect the current runtime state")
+            report = engine.run_goal("analyze the current system state")
 
             self.assertIn("completed a useful cycle", report.final_message)
-            self.assertEqual(report.goal, "inspect the current runtime state")
+            self.assertEqual(report.goal, "analyze the current system state")
             self.assertEqual(report.agents[0].name, "builder")
             self.assertTrue(any(memory.content.startswith("Subagent output:") for memory in report.memories))
             self.assertTrue(any(event.role == "hook:after_delegate" for event in report.events))
