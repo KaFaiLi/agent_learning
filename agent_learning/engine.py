@@ -28,6 +28,45 @@ class RuntimeEngine:
         self.skills.refresh()
         self.mcp_bridge.refresh()
 
+    def begin_session(self, initial_message: str) -> str:
+        """Start a new multi-turn conversation session. Returns the session run_id."""
+        self.refresh()
+        run_id = self.store.start_run(initial_message)
+        self.store.record_event(run_id, "system", "Session started.")
+        self.store.append_memory(run_id, MemoryKind.WORKING, f"Goal: {initial_message}")
+        return run_id
+
+    def run_session_turn(self, session_id: str, message: str) -> RunReport:
+        """Run one turn in an ongoing session identified by *session_id*."""
+        self.store.record_event(session_id, "user", message)
+        self.store.append_memory(session_id, MemoryKind.WORKING, f"User: {message}")
+
+        budget = BudgetState(
+            step_budget_usd=self.settings.default_step_budget_usd,
+            run_budget_usd=self.settings.default_run_budget_usd,
+        )
+
+        final_message = "Turn did not reach a finish state."
+
+        for iteration in range(1, self.settings.max_iterations + 1):
+            agent = self._root_agent()
+            decision = self._run_agent_step(
+                session_id, message, agent, budget, iteration, allow_delegate=True
+            )
+            if decision["done"]:
+                final_message = decision["message"]
+                break
+        else:
+            final_message = "Iteration limit reached before the loop declared success."
+
+        self.store.append_memory(session_id, MemoryKind.WORKING, f"Assistant: {final_message}")
+        self.store.record_event(session_id, "assistant", final_message)
+        return self._build_report(session_id, message, final_message)
+
+    def end_session(self, session_id: str) -> None:
+        """Finish a session and mark it as completed in the store."""
+        self.store.finish_run(session_id)
+
     def run_goal(self, goal: str) -> RunReport:
         self.refresh()
         run_id = self.store.start_run(goal)

@@ -104,7 +104,7 @@ class CLITests(unittest.TestCase):
             self.assertIn("azure_configured=False", output)
             self.assertIn("pricing_model_name=azure-deployment", output)
 
-    def test_main_once_runs_engine_and_prints_summary(self) -> None:
+    def test_main_goal_launches_repl_and_processes_initial_message(self) -> None:
         report = RunReport(
             run_id="run-123",
             goal="inspect once",
@@ -120,21 +120,18 @@ class CLITests(unittest.TestCase):
                 tool_calls=1,
             ),
         )
-        stdout = StringIO()
-        with patch.object(sys, "argv", ["main.py", "--once", "--goal", "inspect once"]):
+        with patch.object(sys, "argv", ["main.py", "--goal", "inspect once"]):
             with patch("agent_learning.cli.RuntimeEngine") as engine_cls:
-                engine_cls.return_value.run_goal.return_value = report
-                with redirect_stdout(stdout):
+                engine_cls.return_value.begin_session.return_value = "run-123"
+                engine_cls.return_value.run_session_turn.return_value = report
+                # After the initial message the REPL waits for input; raise EOFError to exit cleanly.
+                with patch("builtins.input", side_effect=EOFError):
                     main()
 
-        engine_cls.return_value.run_goal.assert_called_once_with("inspect once")
-        output = stdout.getvalue()
-        self.assertIn("Run run-123: done", output)
-        self.assertIn("Agents: goal-runner", output)
-        self.assertIn("Memories: 0", output)
-        self.assertIn("Usage: model=heuristic-fallback total_tokens=15 estimated_cost_usd=0.0100 tool_calls=1", output)
+        engine_cls.return_value.begin_session.assert_called_once_with("inspect once")
+        engine_cls.return_value.run_session_turn.assert_called_once_with("run-123", "inspect once")
 
-    def test_main_launches_tui_with_requested_goal(self) -> None:
+    def test_main_tui_flag_launches_tui_with_requested_goal(self) -> None:
         fake_module = ModuleType("agent_learning.tui.app")
 
         class FakeApp:
@@ -151,7 +148,7 @@ class CLITests(unittest.TestCase):
 
         fake_module.AgentLearningApp = FakeApp
 
-        with patch.object(sys, "argv", ["main.py", "--goal", "inspect ui"]):
+        with patch.object(sys, "argv", ["main.py", "--tui", "--goal", "inspect ui"]):
             with patch("agent_learning.cli.RuntimeEngine") as engine_cls:
                 with patch.dict(sys.modules, {"agent_learning.tui.app": fake_module}):
                     main()
