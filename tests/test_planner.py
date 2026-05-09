@@ -50,7 +50,7 @@ class DecisionPlannerTests(unittest.TestCase):
                 description="Main agent",
                 subagents=["researcher"],
             ),
-            goal="analyze the runtime state",
+            goal="analyze the system state",
             context="Recent memory:\nNo memory yet.",
             budget=BudgetState(),
             available_tools=["clock"],
