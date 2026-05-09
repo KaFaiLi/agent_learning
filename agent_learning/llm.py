@@ -1,226 +1,94 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Protocol
 
 from agent_learning.config import AzureOpenAISettings
-from agent_learning.models import AgentCard, BudgetState, LoopActionType, LoopDecision, UsageSnapshot
-from agent_learning.usage import PricingCatalog
+from agent_learning.models import Message, ToolCall
 
 
-def _make_schema_strict(schema: dict[str, Any]) -> dict[str, Any]:
-    """Recursively patch a JSON schema to satisfy Azure OpenAI strict-mode requirements.
-
-    Azure requires every object node to have ``additionalProperties: false``
-    and every property key to appear in ``required``.
-    """
-    schema = dict(schema)
-    if schema.get("type") == "object" and "properties" in schema:
-        schema["additionalProperties"] = False
-        schema["required"] = list(schema["properties"].keys())
-    for section in ("$defs", "properties"):
-        if section in schema:
-            schema[section] = {
-                k: _make_schema_strict(v) for k, v in schema[section].items()
-            }
-    for keyword in ("anyOf", "allOf", "oneOf"):
-        if keyword in schema:
-            schema[keyword] = [_make_schema_strict(s) for s in schema[keyword]]
-    if "items" in schema:
-        schema["items"] = _make_schema_strict(schema["items"])
-    return schema
+@dataclass
+class LLMReply:
+    message: Message
+    prompt_tokens: int
+    completion_tokens: int
+    model: str
+    finish_reason: str | None = None
 
 
-class DecisionPlanner:
-    def __init__(self, settings: AzureOpenAISettings, pricing: PricingCatalog) -> None:
+class LLMClient(Protocol):
+    def chat(self, *, messages: list[Message], tools: list[dict[str, Any]] | None, model: str | None = None) -> LLMReply: ...
+
+
+class AzureClient:
+    def __init__(self, settings: AzureOpenAISettings) -> None:
+        if not settings.is_configured:
+            raise RuntimeError("Azure OpenAI is not configured (set AZURE_OPENAI_ENDPOINT, _API_KEY, _DEPLOYMENT).")
+        from openai import AzureOpenAI  # local import keeps import cost off the cold path
+
         self.settings = settings
-        self.pricing = pricing
+        self._client = AzureOpenAI(
+            api_key=settings.api_key,
+            api_version=settings.api_version,
+            azure_endpoint=settings.endpoint,
+        )
 
-    def decide(
-        self,
-        *,
-        agent: AgentCard,
-        goal: str,
-        context: str,
-        budget: BudgetState,
-        available_tools: list[str],
-        available_subagents: list[str],
-    ) -> tuple[LoopDecision, UsageSnapshot]:
-        if self.settings.is_configured:
-            decision, usage = self._decide_with_azure(
-                agent=agent,
-                goal=goal,
-                context=context,
-                budget=budget,
-                available_tools=available_tools,
-                available_subagents=available_subagents,
+    def chat(self, *, messages: list[Message], tools: list[dict[str, Any]] | None, model: str | None = None) -> LLMReply:
+        kwargs: dict[str, Any] = {
+            "model": model or self.settings.deployment,
+            "messages": [m.to_openai() for m in messages],
+            "temperature": 0.2,
+        }
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+        response = self._client.chat.completions.create(**kwargs)
+        choice = response.choices[0]
+        msg = choice.message
+        tool_calls: list[ToolCall] = []
+        for tc in (msg.tool_calls or []):
+            try:
+                args = json.loads(tc.function.arguments or "{}")
+            except json.JSONDecodeError:
+                args = {"_raw": tc.function.arguments}
+            tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=args))
+        return LLMReply(
+            message=Message(
+                role="assistant",
+                content=msg.content,
+                tool_calls=tool_calls or None,
+            ),
+            prompt_tokens=getattr(response.usage, "prompt_tokens", 0) or 0,
+            completion_tokens=getattr(response.usage, "completion_tokens", 0) or 0,
+            model=response.model or (model or self.settings.deployment or ""),
+            finish_reason=choice.finish_reason,
+        )
+
+
+@dataclass
+class StubScript:
+    """Canned LLM behaviour for tests: a queue of (tool_calls, content) pairs."""
+
+    turns: list[tuple[list[ToolCall], str | None]]
+    model: str = "stub-model"
+    cursor: int = 0
+
+    def chat(self, *, messages, tools=None, model=None) -> LLMReply:
+        if self.cursor >= len(self.turns):
+            return LLMReply(
+                message=Message(role="assistant", content="(stub exhausted)"),
+                prompt_tokens=10,
+                completion_tokens=2,
+                model=self.model,
+                finish_reason="stop",
             )
-            if decision is not None and usage is not None:
-                return decision, usage
-
-        return self._heuristic_decision(
-            agent=agent,
-            goal=goal,
-            context=context,
-            budget=budget,
-            available_tools=available_tools,
-            available_subagents=available_subagents,
-        )
-
-    def _decide_with_azure(
-        self,
-        *,
-        agent: AgentCard,
-        goal: str,
-        context: str,
-        budget: BudgetState,
-        available_tools: list[str],
-        available_subagents: list[str],
-    ) -> tuple[LoopDecision | None, UsageSnapshot | None]:
-        try:
-            from openai import AzureOpenAI
-        except ImportError:
-            return None, None
-
-        client = AzureOpenAI(
-            api_key=self.settings.api_key,
-            api_version=self.settings.api_version,
-            azure_endpoint=self.settings.endpoint,
-        )
-        response = client.chat.completions.create(
-            model=self.settings.deployment,
-            temperature=0.2,
-            messages=[
-                {
-                    "role": "system",
-                    "content": self._build_system_prompt(agent, available_tools, available_subagents),
-                },
-                {
-                    "role": "user",
-                    "content": self._build_user_prompt(goal, context, budget),
-                },
-            ],
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "loop_decision",
-                    "strict": True,
-                    "schema": _make_schema_strict(LoopDecision.model_json_schema()),
-                },
-            },
-        )
-
-        content = response.choices[0].message.content or "{}"
-        decision = LoopDecision.model_validate(json.loads(content))
-        usage = self.pricing.make_snapshot(
-            prompt_tokens=getattr(response.usage, "prompt_tokens", 0),
-            completion_tokens=getattr(response.usage, "completion_tokens", 0),
-            model_name=self.settings.deployment or self.pricing.model_name,
-        )
-        return decision, usage
-
-    def _heuristic_decision(
-        self,
-        *,
-        agent: AgentCard,
-        goal: str,
-        context: str,
-        budget: BudgetState,
-        available_tools: list[str],
-        available_subagents: list[str],
-    ) -> tuple[LoopDecision, UsageSnapshot]:
-        lower_goal = goal.lower()
-        lower_context = context.lower()
-        tool_name: str | None = None
-        delegate_to: str | None = None
-        message = ""
-        action_type = LoopActionType.FINISH
-        thought = f"{agent.name} is using heuristic planning because Azure OpenAI is not configured."
-        memory_note = f"{agent.name} inspected the goal and remaining budget ${budget.remaining_usd:.2f}."
-        has_subagent_output = "subagent output" in lower_context
-        has_tool_result = "tool " in lower_context and " returned:" in lower_context
-
-        if budget.remaining_usd <= 0:
-            message = "Budget exhausted before another step could run."
-        elif has_subagent_output or has_tool_result:
-            message = (
-                f"{agent.name} completed a useful cycle and has enough context to stop. "
-                "Review the latest memory entries to see the subagent or tool result."
-            )
-        elif "mcp" in lower_goal and "mcp_status" in available_tools:
-            tool_name = "mcp_status"
-            action_type = LoopActionType.TOOL
-            message = "Inspect configured MCP servers."
-        elif "time" in lower_goal and "clock" in available_tools:
-            tool_name = "clock"
-            action_type = LoopActionType.TOOL
-            message = "Check the current UTC timestamp."
-        elif "agent" in lower_goal and "list_agents" in available_tools:
-            tool_name = "list_agents"
-            action_type = LoopActionType.TOOL
-            message = "Inspect the loaded markdown agent definitions."
-        elif "memory" in lower_goal and "memory_snapshot" in available_tools:
-            tool_name = "memory_snapshot"
-            action_type = LoopActionType.TOOL
-            message = "Inspect the current memory snapshot."
-        elif (
-            any(keyword in lower_goal for keyword in ("inspect", "research", "analyze", "explain"))
-            and not has_subagent_output
-            and available_subagents
-            and agent.subagents
-        ):
-            delegate_to = agent.subagents[0]
-            action_type = LoopActionType.DELEGATE
-            message = f"Delegating to {delegate_to} for a focused first pass."
-            thought = f"{agent.name} wants a narrower subagent pass before deciding how to finish."
-        else:
-            message = (
-                f"{agent.name} is ready. Azure OpenAI is {'configured' if self.settings.is_configured else 'not configured'}, "
-                "the loop skeleton is active, and the next slice can focus on deeper tool execution or UI polish."
-            )
-
-        if action_type is LoopActionType.TOOL:
-            memory_note = f"{agent.name} chose tool {tool_name}."
-        elif action_type is LoopActionType.DELEGATE:
-            memory_note = f"{agent.name} delegated to subagent {delegate_to}."
-
-        decision = LoopDecision(
-            thought=thought,
-            action_type=action_type,
-            message=message,
-            tool_name=tool_name,
-            tool_input=goal if tool_name == "echo" else None,
-            delegate_to=delegate_to,
-            memory_note=memory_note,
-        )
-        usage = self.pricing.make_snapshot(
-            prompt_tokens=max(len(goal.split()) * 2 + len(context.split()), 1),
-            completion_tokens=max(len(message.split()), 1),
-            model_name="heuristic-fallback",
-        )
-        return decision, usage
-
-    @staticmethod
-    def _build_system_prompt(
-        agent: AgentCard,
-        available_tools: list[str],
-        available_subagents: list[str],
-    ) -> str:
-        return (
-            f"You are the agent '{agent.name}'. {agent.description}\n\n"
-            f"System prompt:\n{agent.system_prompt}\n\n"
-            f"Tools: {', '.join(available_tools) or 'none'}\n"
-            f"Subagents: {', '.join(available_subagents) or 'none'}\n"
-            f"Skills: {', '.join(agent.skills) or 'none'}\n"
-            f"Memory policy: {agent.memory_policy}\n"
-            "Return a LoopDecision JSON object only."
-        )
-
-    @staticmethod
-    def _build_user_prompt(goal: str, context: str, budget: BudgetState) -> str:
-        return (
-            f"Goal: {goal}\n\n"
-            f"Context:\n{context or 'No prior context.'}\n\n"
-            f"Budget: step=${budget.step_budget_usd:.2f}, run=${budget.run_budget_usd:.2f}, "
-            f"spent=${budget.spent_usd:.4f}, remaining=${budget.remaining_usd:.4f}"
+        tcs, content = self.turns[self.cursor]
+        self.cursor += 1
+        return LLMReply(
+            message=Message(role="assistant", content=content, tool_calls=tcs or None),
+            prompt_tokens=20,
+            completion_tokens=10,
+            model=self.model,
+            finish_reason="tool_calls" if tcs else "stop",
         )

@@ -1,136 +1,68 @@
-from __future__ import annotations
-
-from pathlib import Path
-from tempfile import TemporaryDirectory
-import unittest
-
-from agent_learning.agent_defs import AgentRegistry
-from agent_learning.mcp import MCPBridge
+from agent_learning.agents import AgentRegistry
 from agent_learning.skills import SkillRegistry
 
 
-class RegistryParsingTests(unittest.TestCase):
-    def test_agent_registry_parses_frontmatter_and_defaults(self) -> None:
-        with TemporaryDirectory() as tmp:
-            agent_dir = Path(tmp)
-            (agent_dir / "alpha.md").write_text(
-                """---
-name: alpha
-description: Alpha agent
-tools:
-  - clock
-subagents:
-  - helper
-skills:
-  - inspect
+def _write(path, body):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+
+
+def test_agent_registry_loads_frontmatter(tmp_path):
+    _write(
+        tmp_path / "demo.md",
+        """---
+name: demo
+description: A demo agent.
+tools: [read_file, bash]
+subagents: [reviewer]
+skills: [workspace-etiquette]
 hooks:
-  after_finish:
-    - "{agent}: {details}"
-memory_policy: Keep concise notes.
+  PreToolUse:
+    - "[hook] {tool}"
+acceptance:
+  verify_command: "pytest -q"
+  max_outer_iterations: 3
 ---
-Follow the system prompt.
+You are demo.
 """,
-                encoding="utf-8",
-            )
-            (agent_dir / "beta.md").write_text("Fallback body.", encoding="utf-8")
+    )
+    registry = AgentRegistry(tmp_path)
+    card = registry.get("demo")
+    assert card is not None
+    assert card.tools == ["read_file", "bash"]
+    assert card.subagents == ["reviewer"]
+    assert "PreToolUse" in {ev.value for ev in card.hooks}
+    assert card.acceptance is not None
+    assert card.acceptance.verify_command == "pytest -q"
+    assert card.system_prompt.startswith("You are demo.")
 
-            registry = AgentRegistry(agent_dir)
-            registry.refresh()
 
-            self.assertEqual(registry.names(), ["alpha", "beta"])
-            alpha = registry.get("alpha")
-            beta = registry.get("beta")
-            self.assertIsNotNone(alpha)
-            self.assertIsNotNone(beta)
-            assert alpha is not None
-            assert beta is not None
-            self.assertEqual(alpha.description, "Alpha agent")
-            self.assertEqual(alpha.tools, ["clock"])
-            self.assertEqual(alpha.subagents, ["helper"])
-            self.assertEqual(alpha.skills, ["inspect"])
-            self.assertEqual(alpha.hooks["after_finish"], ["{agent}: {details}"])
-            self.assertEqual(alpha.memory_policy, "Keep concise notes.")
-            self.assertEqual(alpha.system_prompt, "Follow the system prompt.")
-            self.assertEqual(beta.description, "No description provided.")
-            self.assertEqual(beta.system_prompt, "Fallback body.")
-
-    def test_skill_registry_parses_frontmatter_and_defaults(self) -> None:
-        with TemporaryDirectory() as tmp:
-            skill_dir = Path(tmp)
-            (skill_dir / "inspect.md").write_text(
-                """---
-name: inspect
-description: Inspect runtime state
+def test_skill_registry_triggers(tmp_path):
+    _write(
+        tmp_path / "py.md",
+        """---
+name: python-debug
+description: debug python
+triggers: [pytest, traceback]
 ---
-Use read-only investigation.
+Heuristics for fixing failing tests.
 """,
-                encoding="utf-8",
-            )
-            (skill_dir / "fallback.md").write_text("Plain instructions.", encoding="utf-8")
-
-            registry = SkillRegistry(skill_dir)
-            registry.refresh()
-
-            inspect = registry.get("inspect")
-            fallback = registry.get("fallback")
-            self.assertIsNotNone(inspect)
-            self.assertIsNotNone(fallback)
-            assert inspect is not None
-            assert fallback is not None
-            self.assertEqual(inspect.description, "Inspect runtime state")
-            self.assertEqual(inspect.instructions, "Use read-only investigation.")
-            self.assertEqual(fallback.name, "fallback")
-            self.assertEqual(fallback.description, "No description provided.")
-            self.assertEqual(fallback.instructions, "Plain instructions.")
-
-
-class MCPBridgeTests(unittest.TestCase):
-    def test_mcp_bridge_reports_missing_config(self) -> None:
-        with TemporaryDirectory() as tmp:
-            bridge = MCPBridge(Path(tmp) / "mcp_servers.yaml")
-            self.assertEqual(
-                bridge.describe(),
-                "No MCP servers configured. Add mcp_servers.yaml to register stdio servers.",
-            )
-            self.assertEqual(bridge.list_servers(), [])
-
-    def test_mcp_bridge_loads_servers_and_defaults_transport(self) -> None:
-        with TemporaryDirectory() as tmp:
-            config_path = Path(tmp) / "mcp_servers.yaml"
-            config_path.write_text(
-                """servers:
-  - name: docs
-    command: python
-    args:
-      - serve.py
-  - name: search
-    command: node
-    transport: websocket
+    )
+    _write(
+        tmp_path / "etiquette.md",
+        """---
+name: etiquette
+description: always-on
+---
+body
 """,
-                encoding="utf-8",
-            )
+    )
+    registry = SkillRegistry(tmp_path)
+    selected = registry.select(declared=["etiquette"], goal="Fix the failing pytest", recent_text="")
+    names = {s.name for s in selected}
+    assert "etiquette" in names
+    assert "python-debug" in names
 
-            bridge = MCPBridge(config_path)
-
-            servers = bridge.list_servers()
-            self.assertEqual(len(servers), 2)
-            self.assertEqual(servers[0].name, "docs")
-            self.assertEqual(servers[0].args, ["serve.py"])
-            self.assertEqual(servers[0].transport, "stdio")
-            self.assertEqual(servers[1].transport, "websocket")
-            self.assertIn("- docs: python serve.py (stdio)", bridge.describe())
-            self.assertIn("- search: node  (websocket)", bridge.describe())
-
-    def test_mcp_bridge_reports_yaml_errors(self) -> None:
-        with TemporaryDirectory() as tmp:
-            config_path = Path(tmp) / "mcp_servers.yaml"
-            config_path.write_text("servers: [", encoding="utf-8")
-
-            bridge = MCPBridge(config_path)
-
-            self.assertIn("Invalid MCP config in mcp_servers.yaml:", bridge.describe())
-            self.assertEqual(bridge.list_servers(), [])
-
-
-if __name__ == "__main__":
-    unittest.main()
+    rendered = registry.render(selected)
+    assert "## Skills" in rendered
+    assert "python-debug" in rendered

@@ -1,91 +1,120 @@
-# Agent Learning
+# agent-learning
 
-This repo now contains the first runnable slice of an agentic LLM demo built without an agent framework. The current implementation focuses on a plain Azure OpenAI planning loop, markdown-defined agents, skill loading, hook execution, memory persistence, usage and cost tracking, and a Textual-based TUI shell.
+A small Claude-Code-style TUI agent demo. Azure OpenAI under the hood, with
+multi-tool-per-turn function calling, sandboxed file/bash tools, lifecycle
+hooks, markdown-defined agents and skills, sub-agents, an MCP stdio bridge,
+and an optional Ralph loop that iterates until a goal is verified — all in
+about 1.6k lines and four runtime dependencies (`openai`, `pydantic`, `PyYAML`,
+`textual`).
 
-## Current Features
+## Why this exists
 
-- Azure OpenAI configuration from local environment variables only
-- Root `.env` file is auto-loaded at startup
-- Structured loop decisions via typed Pydantic models
-- Parquet-backed runtime memory with working and summary entries
-- Token and estimated cost tracking with configurable pricing
-- Markdown-defined agents with subagent delegation
-- Markdown-defined skills that can be surfaced to the runtime
-- Lifecycle hooks declared in agent markdown frontmatter
-- Tool registry with built-in demo tools
-- MCP configuration discovery through a local YAML file
-- Console mode and Textual TUI entrypoints
+It's a learning demo that mirrors the moving parts of Claude Code without a
+framework, so you can read the whole thing end-to-end:
 
-## Environment Variables
-
-Set the Azure settings in your local shell or in a project-root `.env` file before running the app:
-
-- `AZURE_OPENAI_ENDPOINT`
-- `AZURE_OPENAI_API_KEY`
-- `AZURE_OPENAI_DEPLOYMENT`
-- `AZURE_OPENAI_API_VERSION` (optional, defaults to `2024-10-21`)
-
-Optional pricing inputs for estimated cost tracking:
-
-- `AGENT_LEARNING_MODEL_NAME`
-- `AGENT_LEARNING_INPUT_PRICE_PER_1K_TOKENS`
-- `AGENT_LEARNING_OUTPUT_PRICE_PER_1K_TOKENS`
-
-Optional runtime overrides:
-
-- `AGENT_LEARNING_AGENT_DIR`
-- `AGENT_LEARNING_SKILL_DIR`
-- `AGENT_LEARNING_MCP_CONFIG`
-- `AGENT_LEARNING_MEMORY_PATH`
-- `AGENT_LEARNING_MEMORY_DB` (legacy alias; `.db` values are normalized to `.parquet`)
-- `AGENT_LEARNING_MAX_ITERATIONS`
-- `AGENT_LEARNING_STEP_BUDGET_USD`
-- `AGENT_LEARNING_RUN_BUDGET_USD`
+- Native OpenAI tool-calling loop in `engine.py`
+- File / bash / glob / grep tools constrained to a workspace in `tools/`
+- Hook system with `SessionStart`, `UserPromptSubmit`, `PreToolUse`,
+  `PostToolUse`, `AgentStart`, `AgentStop`, `Stop` events that can `block`,
+  `transform`, or inject extra context — see `hooks.py`
+- Markdown agents in `demo_agents/` with YAML frontmatter (tools, sub-agents,
+  skills, hooks, bash allow/deny, acceptance criteria)
+- Markdown skills in `demo_skills/` with `triggers:` for keyword auto-surfacing
+- MCP stdio bridge in `mcp.py` (newline-delimited JSON-RPC, no extra deps)
+- Ralph loop in `ralph.py` (LLM rubric and/or `verify_command` exit code)
+- Textual TUI in `tui/app.py` with slash commands, streaming events, budget bar
+- Append-only JSONL run log in `.agent_runtime/runs/`
 
 ## Install
 
-```bash
-python -m pip install -e .
+```
+uv sync
+cp .env.example .env             # fill in Azure OpenAI values
+cp settings.example.json settings.json   # optional global hooks/allowlists
+cp mcp_servers.example.yaml mcp_servers.yaml  # optional, needs npx for filesystem server
 ```
 
 ## Run
 
-Console mode:
-
-```bash
-python main.py --once --goal "Inspect the agent markdown, loaded skills, and memory state"
+```
+uv run agent-learning --print-config            # dump resolved settings
+uv run agent-learning                           # launch TUI
+uv run agent-learning --no-tui --goal "..."     # headless run
+uv run agent-learning --no-tui --ralph --agent coder --goal "..."   # Ralph loop
 ```
 
-TUI mode:
+In the TUI, type a goal and press Enter, or use slash commands — `/help`,
+`/goal`, `/agent <name>`, `/ralph on|off`, `/agents`, `/skills`, `/mcp`,
+`/budget`, `/clear`, `/quit`. `Ctrl+R` re-runs the current input, `Ctrl+L`
+refreshes registries, `Ctrl+Q` quits.
 
-```bash
-python main.py
+## Built-in tools
+
+| tool | purpose |
+| --- | --- |
+| `read_file` / `write_file` / `edit_file` | sandboxed file ops; `edit_file` is exact-match |
+| `list_dir` / `glob` / `grep` | workspace inspection |
+| `bash` | shell with deny-list (rm -rf, sudo, outbound curl/wget/ssh, ...) |
+| `list_agents` / `list_skills` / `mcp_status` / `memory_snapshot` | introspection |
+| `todo_write` / `todo_read` | per-run todo list the agent can use |
+| `mcp__<server>__<name>` | every tool exposed by configured MCP servers |
+
+Sub-agents declared in an agent's frontmatter appear to the model as virtual
+tools whose arguments are `{task, context}`.
+
+## Hooks
+
+Configured in `settings.json` (global) and/or in agent frontmatter under
+`hooks:`. Two flavours:
+
+- `template` — a string formatted with the event payload and appended to the
+  run log. Never blocks.
+- `command` — a shell command receiving the event payload as JSON on stdin.
+  Stdout is parsed as `{block, reason, transform, additional_context}`.
+  Non-zero exit (or timeout) blocks the action.
+
+`PreToolUse` hooks can return `transform: {<args>}` to mutate the tool call;
+`PostToolUse` hooks can return `transform: {content: "..."}` to rewrite the
+tool result.
+
+## Skills
+
+Two ways a skill body lands in the system prompt:
+
+1. **Declared** — listed in the agent's frontmatter `skills:`.
+2. **Triggered** — the skill's `triggers:` keyword list matches the goal text
+   (case-insensitive).
+
+The combined block is appended under `## Skills` and capped at ~4000 chars.
+
+## Ralph loop
+
+Set `acceptance:` on an agent (`verify_command`, `rubric`, or both). With
+`--ralph` (or the TUI's `/ralph on`), the engine reruns the goal with the
+unresolved gaps until acceptance passes or the budget is exhausted. If both
+are set, the shell command is authoritative; the rubric only runs when the
+command passes.
+
+## Sub-agents
+
+A sub-agent is just another markdown agent. The parent agent declares it under
+`subagents:`. The engine exposes each sub-agent as a virtual function tool;
+calls cascade onto the parent's `BudgetState`, depth is capped at 1.
+
+## MCP
+
+Each entry in `mcp_servers.yaml` is launched as a subprocess on first use. We
+do an `initialize` handshake, send `notifications/initialized`, then call
+`tools/list` and register each tool as `mcp__<server>__<tool>`. Calls go
+through `tools/call` and the JSON-RPC response's `content` is flattened to
+text for the model.
+
+## Tests
+
+```
+uv run pytest -q
 ```
 
-Print resolved config:
-
-```bash
-python main.py --print-config
-```
-
-## MCP Config
-
-The runtime currently discovers MCP server definitions from `mcp_servers.yaml`. Start by copying the sample file and adjusting the command for your local server.
-
-## Project Layout
-
-- `agent_learning/config.py`: environment-backed runtime settings
-- `agent_learning/memory.py`: parquet-backed memory and usage persistence
-- `agent_learning/llm.py`: Azure OpenAI planner plus heuristic fallback
-- `agent_learning/engine.py`: Ralph-loop style orchestration
-- `agent_learning/tui/app.py`: Textual UI shell
-- `demo_agents/`: markdown-defined agents with hooks and subagents
-- `demo_skills/`: markdown-defined runtime skills
-
-## Next Implementation Slices
-
-1. Replace MCP discovery-only scaffolding with live stdio MCP tool bridging.
-2. Add richer tool definitions and goal-specific subagent behaviors.
-3. Surface event history, skills, and budget state more richly inside the TUI.
-4. Add tests for the markdown loaders, hook execution, and runtime loop.
-
+Tests cover models, store, tool sandbox, hooks, MCP framing (against a fake
+stdio server), engine loop (with a stub LLM), and Ralph (both shell-verify and
+stubbed-rubric paths). No live Azure call is made.

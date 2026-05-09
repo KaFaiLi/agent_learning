@@ -1,0 +1,13 @@
+{
+  "default_agent": "goal-runner",
+  "bash_deny": [],
+  "bash_allow": [],
+  "hooks": {
+    "SessionStart": [
+      "[hook] session started for {agent}"
+    ],
+    "PreToolUse": [
+      {"matcher": "^bash$", "type": "template", "run": "[hook] bash about to run: {arguments}"}
+    ]
+  }
+}
