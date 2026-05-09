@@ -268,8 +268,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--goal",
-        help="Optional opening message sent as the first turn of the REPL, "
-             "or as the initial goal value when --tui is used.",
+        help=(
+            "Optional opening message sent as the first turn of the REPL, "
+            "or as the initial goal value when --tui is used."
+        ),
     )
     return parser
 
@@ -305,5 +307,5 @@ def main() -> None:
         app.run()
         return
 
-    cli = ConsoleCLI(engine=engine, initial_message=goal if args.goal else None)
+    cli = ConsoleCLI(engine=engine, initial_message=args.goal)
     cli.run()
